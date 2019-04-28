@@ -1,0 +1,12 @@
+Package: syncthing-cli
+Version: ::VERSION::
+Section: free
+Priority: optional
+Architecture: all
+Depends: bash, jq
+Installed-Size: 0
+Maintainer: Kael Shipman <kael.shipman@gmail.com>
+Description: A small bash-bashed CLI that just dresses calls to syncthing's REST API.
+ The utility also allows for plugins to be used. Any executable found on the path that starts with
+ `st-` is listed as a plugin when you run the `st list-commands` command.
+

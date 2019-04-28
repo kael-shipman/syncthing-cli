@@ -1,0 +1,395 @@
+#!/bin/bash
+
+set -e
+
+if [ -z "$ST_BIN_PATH" ]; then ST_BIN_PATH=/usr/bin/; fi
+
+NATIVE_COMMANDS="list-commands|list-folders|scan|status"
+
+i=1
+ST_PORT=8384
+ST_HOST=localhost
+while [ "$i" -le "$#" ]; do
+    arg="${!i}"
+    case "$arg" in
+        -h|--help)
+            if [ -n "$CMD" ]; then
+                man "st-${CMD}"
+            else
+                man st
+            fi
+            exit
+        ;;
+
+        -p|--port)
+            j=$((i+1))
+            ST_PORT="${!j}"
+            shift 2
+        ;;
+
+        -o|--host)
+            j=$((i+1))
+            ST_HOST="${!j}"
+            shift 2
+        ;;
+
+        *)
+            if [ -z "$CMD" ] && echo "$arg" | grep -q "^[a-z][a-z-]\+$"; then
+                CMD="$arg"
+                shift
+            else
+                i=$((i+1))
+            fi
+        ;;
+    esac
+done
+
+if [ -z "$CMD" ]; then
+    >&2 echo "st: E: You must pass a valid syncthing cli command."
+    >&2 echo "       See \`man st\` for more details."
+    >&2 echo
+    exit 1
+fi
+
+if command -v tput &>/dev/null; then
+    bold="$(tput bold)"
+    normal="$(tput sgr0)"
+else
+    bold=""
+    normal=""
+fi
+
+
+
+
+
+##############################################################
+# Utility Functions                                          #
+##############################################################
+
+##
+# Just checks to see if extraneous arguments have been passed and outputs a standard message
+##
+function _check_invalid_args() {
+    if [ -n "$2" ]; then
+        >&2 echo "$1: E: Invalid arguments passed: $2"
+        >&2 echo
+        return 10
+    fi
+}
+
+##
+# Sets the global CSRF token variables for use with future calls.
+#
+# @sets $_CSRF_TOKEN_NAME The name of the CSRF token to use as header name
+# @sets $_CSRF_TOKEN The value of the CSRF token to use as header value
+# @return void
+##
+function _set_csrf_token() {
+    if [ -z "$_CSRF_TOKEN" ]; then
+        local r
+        r="$(curl -I "http://$ST_HOST:$ST_PORT" 2>/dev/null)"
+        if [ "$?" -ne 0 ]; then
+            >&2 echo "st: E: Can't reach syncthing at "$ST_HOST":"$ST_PORT". Are you sure it's running?"
+            >&2 echo
+            return 25
+        fi
+        if [ "$(echo "$r" | sed 1q | cut -d ' ' -f 2)" -ne 200 ]; then
+            >&2 echo "st: E: Received a bad response from syncthing at $ST_HOST:$ST_PORT: "
+            >&2 echo
+            >&2 echo "    $(echo "$r" | head -n 1 | sed -E 's/^([A-Za-z0-9:\/. ]+).*$/\1/g')"
+            >&2 echo
+            return 30
+        fi
+        _CSRF_TOKEN_NAME="$(echo "$r" | grep "CSRF-Token" | sed -E 's/^.* ([A-Za-z0-9-]+)=.+$/\1/g')"
+        _CSRF_TOKEN="$(echo "$r" | grep "CSRF-Token" | sed -E 's/^[^=]+=([A-Za-z0-9]+).*$/\1/')"
+    fi
+}
+
+##
+# Parses the body out of an HTTP response
+#
+# NOTE: This is very inefficient. If anyone has a better way to do this, I would love to scrap
+# this and use that instead.
+#
+# @param string $1 The full HTTP response
+# @echo string The parsed-out body of the response
+##
+function _get_http_body() {
+    local body="$1"
+    local lc top
+    while [ -n "$body" ]; do
+        lc="$(echo "$body" | wc -l)"
+        top="$(echo "$body" | head -n 1)"
+        body="$(echo "$body" | tail -n $((lc-1)))"
+
+        if echo "$top" | grep -Fxq $'\r'; then
+            break
+        fi
+    done
+    echo "$body"
+}
+
+##
+# Makes the specified API call
+#
+# @param "GET"|"PUT"|"PATCH"|"POST"|"DELETE" $1 The HTTP Method to use for the request
+# @param string $2 The endpoint to target
+# @param string|null $3 The body of the request
+# @echo string|null The body of the response
+#
+function _call() {
+    local METHOD="$1"
+    local ENDPOINT="$2"
+    local REQ_BODY="$3"
+    local data=
+
+    if ! echo "$METHOD" | grep -q "GET\|POST"; then
+        >&2 echo "st: E: Invalid method used for call: $METHOD"
+        >&2 echo
+        return 20
+    fi
+
+    _set_csrf_token
+    local ex="$?"
+
+    if [ "$ex" -gt 0 ]; then return "$ex"; fi
+
+    # Warning! Not very robust!
+    # TODO: Fix this
+    if ! echo "$METHOD" | grep -iq "GET"; then
+        local data="-d '$REQ_BODY'"
+    fi
+
+    local r="$(curl -i -H "X-$_CSRF_TOKEN_NAME: $_CSRF_TOKEN" -X "$METHOD" $data "http://$ST_HOST:${ST_PORT}${ENDPOINT}" 2>/dev/null)"
+    local response_line="$(echo "$r" | head -n 1 | sed -E 's/^([A-Za-z0-9:\/. ]+).*$/\1/g')"
+    local response_body="$(_get_http_body "$r")"
+    if [ "$(echo "$r" | head -n 1 | cut -d ' ' -f 2)" -gt 299 ]; then
+        >&2 echo "st: E: Received a bad response from syncthing at $ST_HOST:${ST_PORT}${ENDPOINT}:" \
+                 "$response_line: $response_body"
+        >&2 echo
+        return 35
+    fi
+
+    echo "$response_body"
+}
+
+
+
+
+
+
+
+
+
+
+##############################################################
+# Syncthing Functions                                        #
+##############################################################
+
+##
+# List all available commands, including plugins.
+#
+# Outputs available commands, including any commands found on the path starting with `st-`.
+#
+# @flag -r|--raw Whether to return a raw list or a human-formatted list of commands
+# @echo string The \n-separated list of commands
+##
+function list_commands() {
+    local RAW=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -r|--raw)
+                RAW=1
+                shift
+            ;;
+
+            *)
+                >&2 echo "st: list-commands: E: Invalid arguments passed: $2"
+                >&2 echo
+                return 10
+            ;;
+        esac
+    done
+
+    cmds=()
+
+    # First list native commands
+    while read -u8 -r -d "|" c || [ -n "$c" ]; do
+        cmds+=("$c")
+    done 8< <(echo "$NATIVE_COMMANDS")
+
+    # Then list plugins
+    while read -u8 -r -d $'\n' c || [ -n "$c" ]; do
+        cmds+=("$(basename "$c" | sed 's/^st-//')")
+    done 8< <(ls -1 "$ST_BIN_PATH/st-"* 2>/dev/null)
+
+    if [ "${#cmds[@]}" -eq 0 ]; then
+        if [ $RAW -eq 0 ]; then
+            echo "No syncthing commands installed at $ST_BIN_PATH. See help for instructions on"
+            echo "installing commands."
+        fi
+    else
+        if [ $RAW -eq 0 ]; then
+            echo "Available commands:"
+            echo
+        fi
+
+        while read -u8 -r -d $'\n' c || [ -n "$c" ]; do
+            if [ $RAW -eq 0 ]; then
+                echo -n "    "
+            fi
+            echo "$c"
+        done 8< <(IFS=$'\n'; echo "${cmds[*]}")
+
+        if [ $RAW -eq 0 ]; then
+            echo
+        fi
+    fi
+}
+
+##
+# List all known syncthing folders and their IDs
+#
+# @sets _ST_FOLDER_IDS
+# @sets _ST_FOLDER_NAMES
+# @sets _SET_FOLDER_PATHS
+# @flag -i|--ids-only Whether to list just the IDs in computer-readable format or the more
+# decorative IDs and folder names
+# @echo string The \n-separated list of folders
+##
+function list_folders() {
+    local IDS_ONLY=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -i|--ids-only)
+                IDS_ONLY=1
+                shift
+            ;;
+        esac
+    done
+
+    _check_invalid_args "list-folders" "$@"
+
+    if [ -z "$_ST_FOLDER_IDS" ]; then
+        local r="$(_call "GET" "/rest/system/config" || echo "$?")"
+        if [ "$r" -eq "$r" ] &>/dev/null; then
+            return "$r"
+        fi
+
+        _ST_FOLDER_IDS="$(echo "$r" | jq -r ".folders[].id")"
+        _ST_FOLDER_NAMES="$(echo "$r" | jq -r ".folders[].label")"
+        _ST_FOLDER_PATHS="$(echo "$r" | jq -r ".folders[].path")"
+    fi
+
+    if [ "$IDS_ONLY" -eq 1 ]; then
+        echo "$_ST_FOLDER_IDS"
+    else
+        local i=1
+        local ln="$(echo "$_ST_FOLDER_IDS" | wc -l)"
+        local output=
+        while [ $i -le "$ln" ]; do
+            output="${output}${bold}$(echo "$_ST_FOLDER_IDS" | sed "${i}q;d")${normal}"
+            output="${output}"$'\t'"${bold}$(echo "$_ST_FOLDER_NAMES" | sed "${i}q;d")${normal}"
+            output="${output}"$'\t'"$(echo "$_ST_FOLDER_PATHS" | sed "${i}q;d")"$'\n'
+            i=$((i+1))
+        done
+        echo "$output" | sort -k 2 | column -s $'\t' -t
+    fi
+}
+
+##
+# Run a scan of the given folders (by ID) or or all folders if no IDs provided
+#
+# @param string $n|null Zero or more folder IDs to scan
+##
+function scan() {
+    folders=()
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            *)
+                if ! echo "$1" | grep -Eq '^[a-z0-9][a-z0-9-]+$'; then
+                    >&2 echo "st-scan: E: Invalid folder id '$1'. You must pass"
+                    >&2 echo "            valid syncthing folder ids to scan one or more specific"
+                    >&2 echo "            folders."
+                    >&2 echo
+                    return 5
+                else
+                    folders+=("$1")
+                fi
+                shift
+            ;;
+        esac
+    done
+
+    # Sync all if no folders given
+    if [ "${#folders[@]}" -eq 0 ]; then
+        echo "Syncing all folders...."
+        _call "POST" "/rest/db/scan"
+    else
+        while read -u8 -r -d $'\n' id || [ -n "$id" ]; do
+            echo "Syncing folder '${bold}${id}${normal}'..."
+            _call "POST" "/rest/db/scan?folder=$id"
+        done 8< <(IFS=$'\n'; echo "${folders[*]}")
+    fi
+}
+
+##
+# Get the current status of the syncthing daemon (running or not running)
+##
+function status() {
+    echo
+    echo "Syncthing Status:" \
+        "$(_set_csrf_token 2>/dev/null && \
+            echo "${bold}RUNNING${normal} on port ${bold}${ST_PORT}${normal}" || \
+            echo "${bold}NOT RUNNING${normal} on port ${bold}${ST_PORT}${normal}")"
+    echo
+}
+
+
+
+
+
+
+
+
+##############################################################
+# Validate                                                   #
+##############################################################
+
+if ! list_commands -r | grep -Fxq "$CMD"; then
+    >&2 echo "Invalid command passed: $CMD"
+    >&2 list_commands
+    exit 53
+fi
+
+
+
+
+
+
+
+
+##############################################################
+# Execute                                                    #
+##############################################################
+
+# Native commands
+if echo "$CMD" | grep -Eq "$NATIVE_COMMANDS"; then
+    "$(echo "$CMD" | sed 's/-/_/g')" "$@"
+
+# Plugins
+else
+    if ! command -v "$ST_BIN_PATH/st-${CMD}" &>/dev/null ; then
+        >&2 echo "st: E: The command you've passed ($CMD) does not appear to be"
+        >&2 echo "       a valid syncthing command. If this is a plugin, please"
+        >&2 echo "       make sure you link it into your syncthing path"
+        >&2 echo "       ($ST_BIN_PATH) and prefix it with \`st-\`. See \`man st\`"
+        >&2 echo "       for more details."
+        >&2 echo
+        exit
+    fi
+
+    "$ST_BIN_PATH/st-${CMD}" "$@"
+fi
+
