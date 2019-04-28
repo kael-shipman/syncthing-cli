@@ -377,7 +377,7 @@ fi
 _ST_CONTEXT=1
 
 # Native commands
-if echo "$CMD" | grep -Eq "$NATIVE_COMMANDS"; then
+if echo "$CMD" | grep -Exq "$NATIVE_COMMANDS"; then
     "$(echo "$CMD" | sed 's/-/_/g')" "$@"
 
 # Plugins
