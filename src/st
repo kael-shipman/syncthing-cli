@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -ae
 
 if [ -z "$ST_BIN_PATH" ]; then ST_BIN_PATH=/usr/bin/; fi
 
@@ -137,7 +137,7 @@ function _get_http_body() {
 # @param string $2 The endpoint to target
 # @param string|null $3 The body of the request
 # @echo string|null The body of the response
-#
+##
 function _call() {
     local METHOD="$1"
     local ENDPOINT="$2"
@@ -373,6 +373,8 @@ fi
 ##############################################################
 # Execute                                                    #
 ##############################################################
+
+_ST_CONTEXT=1
 
 # Native commands
 if echo "$CMD" | grep -Eq "$NATIVE_COMMANDS"; then
