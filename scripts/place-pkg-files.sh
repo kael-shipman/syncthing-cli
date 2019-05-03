@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 pkgnm="$1"
 targdir="$2"
 pkgtype="$3"
@@ -19,6 +21,15 @@ if [ ! -d "$targdir" ]; then
     exit 5
 fi
 
-mkdir -p "$targdir/usr/bin"
-cp src/* "$targdir/usr/bin/"
+prefix="$targdir/opt/$pkgnm"
+mkdir -p "$prefix/bin"
+cp src/* "$prefix/bin/"
+
+if ./scripts/build-docs.sh >/dev/null; then
+    mkdir -p "$prefix/share/man/"
+    cp -R ./doc-build/* "$prefix/share/man/"
+else
+    >&2 echo "Couldn't build man pages! Not continuing with package build."
+    exit 10
+fi
 

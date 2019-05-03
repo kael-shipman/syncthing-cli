@@ -1,0 +1,21 @@
+#!/bin/bash
+
+pkg_path="/opt/syncthing-cli"
+
+# Hard-code master link
+args=(--install "/usr/bin/st" "st" "$pkg_path/bin/st" 100)
+
+# Add all auxiliary files as slaves
+while read -u8 -r -d $'\n' file || [ -n "$file" ]; do
+    base="${file#$pkg_path/}";
+    link="/usr/$base";
+    name="$(basename "$base")";
+    path="$file";
+
+    if [ "$base" != "bin/st" ]; then
+        args+=(--slave "$link" "$name" "$path")
+    fi
+done 8< <(find "$pkg_path" -type f)
+
+update-alternatives ${args[@]}
+
