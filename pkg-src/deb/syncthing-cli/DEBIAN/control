@@ -3,7 +3,7 @@ Version: ::VERSION::
 Section: free
 Priority: optional
 Architecture: all
-Depends: bash (>= 4.3.1), jq, sed, coreutils
+Depends: bash (>= 4.3), jq, sed, coreutils
 Installed-Size: 0
 Maintainer: Kael Shipman <kael.shipman@gmail.com>
 Description: A small bash-bashed CLI that just dresses calls to syncthing's REST API.
